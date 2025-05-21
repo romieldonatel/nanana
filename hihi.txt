@@ -1,0 +1,982 @@
+=====wifi_conection====
+
+import subprocess
+
+NETWORKS = [
+    "OfficeWiFi",
+    "LabGuest",
+    "Legacy24",
+    "IoTNet",
+    "BackupNet",
+]
+
+def adb(args): return subprocess.check_output(["adb", "shell"] + args, text=True)
+
+def connect_wifi():
+    for i, ssid in enumerate(NETWORKS, 1): print(f"{i}. {ssid}")
+    i = int(input("Choose: ")) - 1
+    ssid = NETWORKS[i]
+    psk = input("Enter password: ")
+
+    try:
+        adb(["svc", "wifi", "enable"])
+        if "connect-network" in adb(["cmd", "wifi", "-h"]):
+            adb(["cmd", "wifi", "connect-network", ssid, "wpa3", psk])
+            print("✓ Connected via CLI")
+        else:
+            raise Exception("CLI not supported")
+    except:
+        print("↪ UI fallback")
+        subprocess.run(["python", "ui_connect_wifi.py", "--ssid", ssid, "--psk", psk])
+
+connect_wifi()
+
+
+
+
+===user_data====
+"""user_data.py – generate all user fields, including random date-of-birth."""
+from __future__ import annotations
+from pathlib import Path
+import csv, random
+import re
+
+
+CSV_PATH = Path(r"C:\Users\omrik\one_project\andro\names.csv")
+MAX_COUNTRIES = 5
+
+with CSV_PATH.open(newline="", encoding="utf-8") as f:
+    _rows = list(csv.reader(f))
+
+def _random_name(country_idx: int):
+    col = 2 * (country_idx - 1)
+    row = random.choice(_rows)
+    return row[col], row[col + 1]
+
+
+class UserData:
+    def __init__(self, user_id: str, phone: str, country_idx: int):
+        self.user_id = user_id
+        self.phone   = phone
+        self.country_idx = country_idx
+
+        self.first_name, self.last_name = _random_name(country_idx)
+        self.email = self._gen_email()
+        self.password = self._gen_password()
+
+        # Correct use of method
+        self.dob_day, self.dob_month, self.dob_year = self._gen_dob()
+
+        #self.wifi_name, self.wifi_pass = self._wifi_details()
+
+    def _gen_dob(self) -> tuple[str, str, str]:
+        """Generates a realistic date of birth: (day, month_name, year)"""
+        months = {
+            "January": 31,
+            "February": 29,
+            "March": 31,
+            "April": 30,
+            "May": 31,
+            "June": 30,
+            "July": 31,
+            "August": 31,
+            "September": 30,
+            "October": 31,
+            "November": 30,
+            "December": 31
+        }
+        year = random.randint(1980, 2005)
+        month = random.choice(list(months.keys()))
+        day = random.randint(1, months[month])
+        return month, str(day), str(year)
+
+    def _gen_email(self) -> str:
+        safe_id = re.sub(r"[^a-zA-Z0-9]", "", self.user_id)
+        return f"{self.first_name}{self.last_name}{safe_id}".lower()
+    
+    def _gen_password(self) -> str:
+        return f"{self.first_name[:1].upper()}{self.first_name[1:2].lower()}%1234567890"
+
+
+
+
+
+
+===ui_actions===
+
+
+"""ui_actions.py – Reusable actions that analyse the UI XML hierarchy.
+Depends **only** on adb_helpers (aliased as *ah*).
+"""
+from __future__ import annotations
+import logging, time, xml.etree.ElementTree as ET
+from typing import Optional
+
+import adb_helpers as ah
+from helpers import log_if_failed
+
+log = logging.getLogger("AUTOMATION")
+
+# … search_tap, search_long_press …
+
+@log_if_failed
+def disable_all_checked_elements(serial: Optional[str] = None) -> bool:
+    """Toggle‑off any element reporting checked="true" or selected="true"."""
+    # implementation identical to previous revision
+
+_SWITCH = "android.widget.Switch"
+_EDIT   = "android.widget.EditText"
+
+def wait(seconds: float):
+    """Simple blocking sleep wrapper (seconds may be *float*)."""
+    time.sleep(seconds)
+
+
+# ────────────────────────────────────────────────────────────────
+# Search & tap utilities
+
+
+@log_if_failed
+def search_tap(label: str, serial: Optional[str] = None, timeout: float = 5.0) -> bool:
+    """Tap first element whose *text* OR *content‑desc* contains *label*."""
+    target = label.strip().lower()
+    start  = time.time()
+    while time.time() - start <= timeout:
+        xml = ah.fresh_xml(serial)
+        for node in ET.fromstring(xml).iter():
+            txt  = node.attrib.get("text", "").strip().lower()
+            desc = node.attrib.get("content-desc", "").strip().lower()
+            if target in txt or target in desc:
+                x, y = ah.parse_bounds(node.attrib["bounds"])
+                ah.input_tap(x, y, serial)
+                log.info("search_tap › '%s' @ %d,%d", label, x, y)
+                return True
+        time.sleep(0.25)
+    log.warning("search_tap › label '%s' not found", label)
+    return False
+
+
+#idial for play store
+@log_if_failed
+def search_tap_ps(label: str, serial: Optional[str] = None, timeout: float = 5.0) -> bool:
+    target = label.strip().lower()
+    start  = time.time()
+    while time.time() - start <= timeout:
+        xml = ah.fresh_xml(serial)
+        for node in ET.fromstring(xml).iter("node"):
+            txt  = node.attrib.get("text", "").strip().lower()
+            desc = node.attrib.get("content-desc", "").strip().lower()
+            if target in txt or target in desc:
+                try:
+                    x, y = ah.parse_bounds(node.attrib["bounds"])
+                    ah.input_tap(x, y, serial)
+                    log.info("search_tap_ps › '%s' @ %d,%d", label, x, y)
+                    return True
+                except Exception as exc:
+                    log.debug("Bounds parse error: %s", exc)
+        time.sleep(0.25)
+    log.warning("search_tap_ps › label '%s' not found", label)
+    return False
+
+#idial for open acount (think its dont work well)
+@log_if_failed
+def tap_res_id(res_id: str, serial: str | None = None, wait: float = 5.0) -> bool:
+    """Tap the first node whose resource‑id contains *res_id* (case‑insensitive)."""
+    start = time.time()
+    tgt   = res_id.lower()
+    while True:
+        xml = ah.fresh_xml(serial)
+        for n in ET.fromstring(xml).iter():
+            if tgt in n.attrib.get("resource-id", "").lower():
+                x, y = ah.parse_bounds(n.attrib["bounds"])
+                ah.input_tap(x, y, serial)
+                log.info("TAP_RES_ID '%s' @ %d,%d", res_id, x, y)
+                return True
+        if time.time() - start > wait:
+            log.warning("tap_res_id: '%s' not found", res_id)
+            return False
+        time.sleep(0.2)
+
+#idial for long press on the play store
+@log_if_failed
+def search_long_press(label: str, duration_ms: int = 1000, serial: Optional[str] = None, timeout: float = 5.0) -> bool:
+    """Long‑press a label for *duration_ms* milliseconds."""
+    target = label.strip().lower()
+    start  = time.time()
+    while time.time() - start <= timeout:
+        xml = ah.fresh_xml(serial)
+        for node in ET.fromstring(xml).iter():
+            if target in (node.attrib.get("text", "").lower(), node.attrib.get("content-desc", "").lower()):
+                x, y = ah.parse_bounds(node.attrib["bounds"])
+                ah.adb(["shell", "input", "swipe", str(x), str(y), str(x), str(y), str(duration_ms)], serial)
+                log.info("search_long_press › '%s' @ %d,%d (%d ms)", label, x, y, duration_ms)
+                return True
+        time.sleep(0.25)
+    log.warning("search_long_press › label '%s' not found", label)
+    return False
+
+# ────────────────────────────────────────────────────────────────
+# Misc helpers (tap, switch_off) for switch and chrome
+
+@log_if_failed
+def disable_all_checked_elements(serial: Optional[str] = None) -> bool:
+
+    """Toggle‑off any element whose XML reports checked="true" or selected="true"."""
+    xml = ah.fresh_xml(serial)
+    found = False
+    for n in ET.fromstring(xml).iter():
+        checked  = n.attrib.get("checked", "").lower() == "true"
+        selected = n.attrib.get("selected", "").lower() == "true"
+        if checked or selected:
+            x, y = ah.parse_bounds(n.attrib["bounds"])
+            ah.input_tap(x, y, serial)
+            log.info("Disabled element @ %d,%d", x, y)
+            found = True
+    if not found:
+        log.info("disable_all_checked_elements › no toggles found")
+    return found
+
+
+# need to check - if use it - write!
+@log_if_failed
+def switch_off(label: str, serial: Optional[str] = None, wait: float = 5.0):
+    start = time.time()
+    while True:
+        xml = ah.fresh_xml(serial)
+        tree = ET.fromstring(xml)
+        for sw in tree.iter():
+            if sw.attrib.get("class") == _SWITCH and sw.attrib.get("checked") == "true":
+                x, y = ah.parse_bounds(sw.attrib["bounds"])
+                ah.input_tap(x, y, serial)
+                log.info("SWITCH_OFF @ %d,%d", x, y)
+                return
+        if time.time() - start > wait:
+            log.warning("No enabled switch found in switch_off")
+            return
+        time.sleep(0.2)
+
+# need to check - if use it - write!
+@log_if_failed
+def switch_off_all(serial: Optional[str] = None, wait_per_switch: float = 0.3, max_rounds: int = 20) -> int:
+    total = 0
+    rounds = 0
+    while rounds < max_rounds:
+        rounds += 1
+        xml = ah.fresh_xml(serial)
+        tree = ET.fromstring(xml)
+        target = next(
+            (n for n in tree.iter() if n.attrib.get("class") == _SWITCH and n.attrib.get("checked") == "true"),
+            None
+        )
+        if not target:
+            break
+        x, y = ah.parse_bounds(target.attrib["bounds"])
+        ah.input_tap(x, y, serial)
+        log.info("SWITCH_OFF_ALL @ %d,%d (round %d)", x, y, rounds)
+        total += 1
+        time.sleep(wait_per_switch)
+    return total
+
+
+# ── simple text input helper ────── test for device info──────its dont work──────────────────────────── 
+def input_text(text: str, serial: str | None = None) -> None:
+    """
+    Inject *text* into the currently-focused EditText on the device.
+    Spaces are replaced with %s so ADB passes them literally.
+    """
+    safe = text.replace(" ", "%s")
+    ah.adb(["shell", "input", "text", safe], serial)
+    log.info("INPUT_TEXT '%s'", text)
+
+
+
+====name_provider====
+
+"""name_provider.py – Random (first,last) name selection by country."""
+from pathlib import Path
+from typing import Tuple
+import csv, random
+
+CSV_PATH = Path(r"C:\Users\omrik\one_project\andro\names.csv")
+MAX_COUNTRIES = 5
+
+with CSV_PATH.open(newline="", encoding="utf‑8") as f:
+    _rows = list(csv.reader(f))
+
+if not _rows or len(_rows[0]) != MAX_COUNTRIES * 2:
+    raise ValueError("names.csv must have 10 columns (first,last × 5)")
+
+def random_name(country_idx: int) -> Tuple[str, str]:
+    if not 1 <= country_idx <= MAX_COUNTRIES:
+        raise ValueError("country_idx must be 1‑5")
+    col = 2 * (country_idx - 1)
+    row = random.choice(_rows)
+    return row[col], row[col + 1]
+
+
+
+
+===helpers====
+
+
+
+"""helpers.py – Generic decorators & logger utilities."""
+import logging
+from functools import wraps
+
+def log_if_failed(func):
+    """Decorator: if function returns *False* log a warning."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        if result is False:
+            logging.warning("[%s] failed – args=%s kwargs=%s", func.__name__, args, kwargs)
+        return result
+    return wrapper
+
+def log_user(user):
+    print(f"[LOG] User: {user.first_name} {user.last_name}, ID: {user.user_id}")
+
+
+
+
+
+====device_info=====
+
+
+
+
+"""device_info.py – Gather ALL HW/SW facts for an Android handset
+and append them (plus user fields) to a CSV.
+
+Public API (import מה-flow):
+    from device_info import collect_device_info
+    collect_device_info(user, serial, csv_path="output.csv")
+"""
+from __future__ import annotations
+
+import csv
+import datetime as _dt
+import logging
+import os
+import re
+import subprocess
+from typing import Dict, Tuple
+
+log = logging.getLogger("AUTOMATION")
+
+# ── low-level shell helper ──────────────────────────────────────────
+def _sh(cmd: str) -> Tuple[str, int]:
+    """Run *cmd* and return (stdout-str, exitcode)."""
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    out, _ = proc.communicate()
+    return out.strip(), proc.returncode
+
+# ── generic getprop ─────────────────────────────────────────────────
+def _getprop(serial: str, prop: str) -> str:
+    return _sh(f"adb -s {serial} shell getprop {prop}")[0]
+
+# ── individual field helpers ───────────────────────────────────────
+def _vendor(serial: str) -> str:
+    for p in (
+        "ro.product.manufacturer",
+        "ro.product.vendor.manufacturer",
+    ):
+        if v := _getprop(serial, p):
+            return v
+    return "UNKNOWN"
+
+def _model(serial: str) -> str:
+    props = [
+        "ro.product.model",
+        "ro.product.odm.model",
+        "ro.product.system.model",
+        "ro.product.vendor.model",
+    ]
+    for p in props:
+        if m := _getprop(serial, p):
+            return m
+    return "UNKNOWN"
+
+_android_version      = lambda s: _getprop(s, "ro.build.version.release")
+_kernel_version       = lambda s: _sh(f"adb -s {s} shell uname -r")[0]
+_kernel_arch          = lambda s: _sh(f"adb -s {s} shell uname -m")[0]
+_board_platform       = lambda s: _getprop(s, "ro.board.platform")
+_security_patch       = lambda s: _getprop(s, "ro.build.version.security_patch") \
+                                  or _getprop(s, "ro.vendor.build.security_patch")
+_device_name          = lambda s: _sh(f"adb -s {s} shell settings get global device_name")[0]
+
+def _gpu(serial: str) -> str:
+    gpus = {"adreno": "/dev/kgsl-3d0", "mali": "/dev/mali0"}
+    for name, path in gpus.items():
+        _, ret = _sh(f"adb -s {serial} shell ls {path}")
+        if ret == 0:
+            return name
+    return "UNKNOWN"
+
+def _allocator(serial: str) -> str:
+    scudo, _ = _sh(
+        f"adb -s {serial} shell strings /system/lib64/libc.so | grep -i scudo"
+    )
+    jem, _ = _sh(
+        f"adb -s {serial} shell strings /system/lib64/libc.so | grep -i jemalloc"
+    )
+    if scudo and not jem:
+        return "scudo"
+    if jem and not scudo:
+        return "jemalloc"
+    return "UNKNOWN"
+
+def _chipset(platform: str) -> str:
+    patterns = {
+        "qualcomm": r"^(sdm|sm|msm|apq|qcs|qcm)",
+        "mediatek": r"^mt\\d{4}",
+        "exynos"  : r"^exynos|^universal",
+        "unisoc"  : r"^ums",
+        "google"  : r"^gs\\d{3}",
+    }
+    for brand, pat in patterns.items():
+        if re.match(pat, platform.lower()):
+            return brand
+    return "unknown"
+
+# ── public helper ──────────────────────────────────────────────────
+def collect_device_info(user, serial: str, *, csv_path: str = "output.csv") -> None:
+    """Append one line with every device/user field to *csv_path*."""
+    platform = _board_platform(serial)
+    info: Dict[str, str] = {
+        # device HW / SW
+        "serial"          : serial,
+        "vendor"          : _vendor(serial),
+        "model"           : _model(serial),
+        "android_version" : _android_version(serial),
+        "security_patch"  : _security_patch(serial),
+        "kernel_version"  : _kernel_version(serial),
+        "kernel_arch"     : _kernel_arch(serial),
+        "board_platform"  : platform,
+        "chipset"         : _chipset(platform),
+        "device_name"     : _device_name(serial),
+        "gpu"             : _gpu(serial),
+        "allocator"       : _allocator(serial),
+        # user fields
+        "user_id"   : user.user_id,
+        "email"     : user.email,
+        "password"  : user.password,
+        "phone"     : user.phone,
+        "dob_day"   : getattr(user, "dob_day", ""),
+        "dob_month" : getattr(user, "dob_month", ""),
+        "dob_year"  : getattr(user, "dob_year", ""),
+        # timestamp
+        "timestamp" : _dt.datetime.now().isoformat(timespec="seconds"),
+    }
+
+    # log each field
+    for k, v in info.items():
+        log.info("[device_info] %-15s : %s", k, v)
+
+    # write / append CSV
+    header_needed = not os.path.isfile(csv_path)
+    with open(csv_path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(info.keys()))
+        if header_needed:
+            writer.writeheader()
+        writer.writerow(info)
+
+
+
+
+
+=====auto_main======
+
+
+
+
+
+"""auto_main.py – Full automation flow.
+• Picks serial automatically (או בחירה אם יותר ממכשיר אחד)
+• Writes device_info + user fields to CSV every run
+"""
+from __future__ import annotations
+import logging, subprocess, re, sys
+from typing import List 
+
+from helpers import log_user
+from user_data import UserData
+from ad_privacy_flow import run_privacy_flow
+from app_actions import register_app
+from device_info import collect_device_info
+# import adb_helpers as ah       # בטל הערה אם תרצה Wi-Fi auto-connect
+
+# ── logging: קובץ + קונסול (קריאה יחידה) ───────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler("automation.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+log = logging.getLogger("AUTOMATION")
+
+# ── ADB helpers – אוטומטית / בחירה ─────────────────────────────────
+def _list_serials() -> List[str]:
+    out = subprocess.check_output(["adb", "devices"], text=True).splitlines()[1:]
+    return [
+        re.match(r"^(\S+)\s+device$", ln.strip()).group(1)
+        for ln in out if ln.strip().endswith("device")
+    ]
+
+def _pick_serial() -> str:
+    devs = _list_serials()
+    if not devs:
+        print("No Android devices detected – connect via USB & enable USB-Debugging.")
+        sys.exit(1)
+    if len(devs) == 1:
+        return devs[0]
+    print("Connected devices:")
+    for i, d in enumerate(devs, 1):
+        print(f" {i}. {d}")
+    idx = int(input("Select device index: "))
+    return devs[idx - 1]
+
+# ── CLI helper – פרטי משתמש ────────────────────────────────────────
+def _get_user_from_cli() -> UserData:
+    user_id = input("Enter user ID: ").strip()
+    phone   = input("Enter phone number: ").strip()
+    country = int(input("Country index (1-5): ").strip())
+    return UserData(user_id, phone, country)
+
+# ── main orchestrator ───────────────────────────────────────────────
+def auto_run(serial: str, *, csv_path: str = "output.csv") -> None:
+    """Run privacy flow, register app, and append HW/SW info to CSV."""
+    user = _get_user_from_cli()
+    log_user(user)
+
+    # ah.connect_to_wifi(user.wifi_name, user.wifi_pass, serial)  # optional
+
+    run_privacy_flow(user, serial)
+    register_app(user, serial)
+
+    collect_device_info(user, serial, csv_path=csv_path)
+    log.info("[DONE] Flow completed for user %s on %s", user.user_id, serial)
+
+# ── Entry-point ─────────────────────────────────────────────────────
+if __name__ == "__main__":
+    auto_run(_pick_serial())
+
+
+
+
+
+
+
+=====app_actions======
+
+
+
+"""app_actions.py – Shortcuts that launch apps or tweak global settings.
+No XML parsing; depends only on adb_helpers + ui_actions for text input.
+"""
+from __future__ import annotations
+import logging, time
+from typing import Optional
+
+import adb_helpers as ah
+import ui_actions
+from user_data import UserData
+
+log = logging.getLogger("AUTOMATION")
+
+# ── Launchers ───────────────────────────────────────────────────
+
+def open_google_play(serial: Optional[str] = None, wait_s: float = 1.0):
+    ah.adb(["shell", "am", "start", "-n", "com.android.vending/.MainActivity"], serial)
+    log.info("open_google_play launched")
+    time.sleep(wait_s)
+
+# Example of a global setting tweak
+
+def set_screen_timeout(ms: int = 1_800_000, serial: Optional[str] = None):
+    ah.adb(["shell", "settings", "put", "system", "screen_off_timeout", str(ms)], serial)
+    log.info("Screen timeout set to %d ms", ms)
+
+# ── Registration helper ─────────────────────────────────────────
+
+def register_app(user: UserData, serial):
+    ui_actions.input_text(user.user_id, serial)
+    ui_actions.input_text(user.email,    serial)
+    ui_actions.input_text(user.phone,    serial)
+    log.info("register_app – filled user fields")
+
+
+======adb_helpers========
+"""adb_helpers.py – Thin, UI‑agnostic wrapper around ADB.
+Keeps ZERO dependency on ui_actions to avoid circular imports.
+"""
+from __future__ import annotations
+import subprocess, logging, re, time
+from pathlib import Path
+from typing import Optional, Tuple
+import time
+
+log = logging.getLogger("AUTOMATION")
+
+_XML_REMOTE = "/sdcard/window_dump.xml"
+_XML_LOCAL  = Path("screen.xml")
+
+def wait(seconds: int):
+    time.sleep(seconds)
+
+# ────────────────────────────────────────────────────────────────
+# Core ADB helper
+
+def adb(cmd: list[str], serial: Optional[str] = None) -> str:
+    """Execute *cmd* via ADB and return stdout or raise on non‑zero exit."""
+    full_cmd = ["adb"] + (["-s", serial] if serial else []) + cmd
+    log.debug("ADB $ %s", " ".join(full_cmd))
+    result = subprocess.run(full_cmd, text=True, capture_output=True)
+    if result.returncode:
+        log.error("ADB failed (%d): %s", result.returncode, result.stderr.strip())
+        raise subprocess.CalledProcessError(result.returncode, full_cmd, result.stdout, result.stderr)
+    return result.stdout.strip()
+
+# ────────────────────────────────────────────────────────────────
+# Screen XML helpers
+
+_BOUND_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+def parse_bounds(bounds: str) -> Tuple[int, int]:
+    """Convert Android bounds string to element centre (x, y)."""
+    m = _BOUND_RE.fullmatch(bounds)
+    if not m:
+        raise ValueError(f"Bad bounds: {bounds}")
+    x1, y1, x2, y2 = map(int, m.groups())
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def fresh_xml(serial: Optional[str] = None) -> str:
+    """Dump current UI hierarchy and return XML text."""
+    adb(["shell", "uiautomator", "dump", _XML_REMOTE], serial)
+    adb(["pull", _XML_REMOTE, str(_XML_LOCAL)], serial)
+    return _XML_LOCAL.read_text(encoding="utf‑8")
+
+# ────────────────────────────────────────────────────────────────
+# Input helpers
+
+def input_tap(x: int, y: int, serial: Optional[str] = None):
+    adb(["shell", "input", "tap", str(x), str(y)], serial)
+
+
+def input_text(text: str, serial: Optional[str] = None):
+    escaped = text.replace(" ", "%s").replace("@", "%40")
+    adb(["shell", "input", "text", escaped], serial)
+
+# ────────────────────────────────────────────────────────────────
+# Wi‑Fi helper (now tolerant)
+
+def connect_to_wifi(ssid: str, password: str, serial: Optional[str] = None):
+
+    """Best‑effort Wi‑Fi connect. Continues if the device refuses svc wifi."""
+    log.info("Connecting to Wi‑Fi SSID='%s'", ssid)
+    try:
+        adb(["shell", "svc", "wifi", "enable"], serial)
+    except subprocess.CalledProcessError as exc:
+        log.warning("Wi‑Fi enable failed – continuing: %s", exc.stderr.strip())
+    time.sleep(1)
+    adb(["shell", "am", "start", "-a", "android.settings.WIFI_SETTINGS"], serial)
+    # Further UI‑level steps handled by ui_actions if desired.
+
+
+
+# ────────────────pretty_print────────────────────────────────────────────────
+
+def pretty_print(msg: str, width: int = 40, char: str = "-"):
+    print(char * width)
+    for line in msg.splitlines():
+        print(line.center(width))
+    print(char * width) 
+
+
+
+====ad_privacy_flow=====
+
+
+
+
+"""ad_privacy_flow – End‑to‑end Play Store privacy flow (May 2025).
+Now explicitly taps First/Last Name and DOB fields via resource‑id, so the wizard
+works even on devices where TAB navigation fails.
+"""
+from __future__ import annotations
+import logging
+from typing import Optional
+
+import adb_helpers as ah
+import ui_actions as ui
+from helpers import log_if_failed
+from user_data import UserData
+from wifi_conection import connect_wifi
+
+log = logging.getLogger("AUTOMATION")
+
+# Resource‑IDs observed on most GMS 2024+ devices
+RID_FIRST  = "id/first_name_field"
+RID_LAST   = "id/last_name_field"
+RID_DAY    = "id/field_day"
+RID_MONTH  = "id/field_month"
+RID_YEAR   = "id/field_year"
+
+# ────────────────────────────────────────────────────────────────
+@log_if_failed
+def run_privacy_flow(user: UserData, serial: Optional[str] = None) -> None:
+    log.info("[Flow] Start for user %s", user.user_id)
+    
+    # _create_account(user, serial) #work great!!
+    #_handle_play_store_appinfo(serial) not write yet
+    #_tweak_play_store_settings(serial) not write yet
+    ui.disable_all_checked_elements(serial)
+    log.info("[Flow] End for user %s", user.user_id)
+
+
+# ─────────────────────────first flow and settings into the phone───────────────────────────────────────
+    # screen timeout
+    # connection to the wifi
+        # case many version of phones  - do it with adb
+            # if is under v11 - 
+            # else 
+
+    # disable blt
+@log_if_failed
+def _first_steps(user: UserData, serial: Optional[str]) -> None:
+    print("you try to connect to wifi network/ be cerfule what you do.")
+    connect_wifi()
+
+
+
+
+# ────────────────────── Create Account Flow ─────────────────────────
+    # work wonderful but it show female
+    # its enter password click Next and stop.
+        
+@log_if_failed
+def _create_account(user: UserData, serial: Optional[str]) -> None:
+    """Fill first/last/email/password + DOB (day‑month‑year)."""
+    ui.search_tap("create account", serial)
+    ui.search_tap("for my personal use", serial)
+    ui.wait(1.0)
+
+    # First name (fallback: TAB if res‑id missing)
+    if not ui.tap_res_id(RID_FIRST, serial):
+        ah.adb(["shell", "input", "keyevent", "61"], serial)  # focus first field
+    ah.input_text(user.first_name, serial)
+
+    # Last name
+    if not ui.tap_res_id(RID_LAST, serial):
+        ah.adb(["shell", "input", "keyevent", "61"], serial)
+    ah.input_text(user.last_name, serial)
+    ah.adb(["shell", "input", "keyevent", "66"], serial)
+
+
+        # Day / Month / Year  (resource‑id first, else TAB‑nav)
+    if not ui.tap_res_id(RID_DAY, serial):
+        ah.adb(["shell", "input", "keyevent", "61"], serial)
+    ah.input_text(user.dob_day, serial)
+
+    if not ui.tap_res_id(RID_MONTH, serial):
+        ah.adb(["shell", "input", "keyevent", "61"], serial)
+    ah.input_text(user.dob_month, serial)
+
+    if not ui.tap_res_id(RID_YEAR, serial):
+        ah.adb(["shell", "input", "keyevent", "61"], serial)
+    ah.input_text(user.dob_year, serial)
+
+    #Gender -Male
+    ui.tap_res_id("Gender", serial)
+    ui.search_tap("Male")
+    ui.search_tap("Next", serial)
+
+    # Email
+    ui.search_tap("Create your own Gmail address", serial)
+    ah.input_text(user.email, serial)
+    ui.search_tap("Next", serial)
+
+    # Password
+    ah.adb(["shell", "input", "keyevent", "61"], serial)
+    ah.input_text(user.password, serial)
+    ui.search_tap("Next", serial)
+    #─────────────────────────────to add here:───────────────────────────────
+    #   scroll
+    #   More options
+    #   Don't save my Web &App Activity in my Google Account
+    #   scroll
+    #   Show me ads that aren't personalised
+    #   scroll
+    #   Don't save my YouTube History in my Google Account
+    #   I agree
+    #   Accept ?
+    #   Im in
+    #
+
+
+#──────────────────────────── Unbox flow ────────────────────────────
+
+
+@log_if_failed
+def Disable_long_press_P_S_flow(serial: Optional[str] = None):
+    """
+    1. Uninstall updates staight
+    2. Customize and control Google Chrome.
+    """
+    # long press on Play Store
+    ui.search_long_press("Play Store", duration_ms=1500)
+    ui.search_tap("App info", serial=serial)
+    ah.wait(4)
+
+    # קריאה ל-XML עדכני במסך App info
+    xml = ah.fresh_xml(serial).lower()
+
+    # זרם 2 - אם מופיע 3 נקודות של Chrome
+    if "customize and control google chrome" in xml:
+        log.info("[handle_play_store_flow] Detected Chrome 3-dot menu flow")
+        ui.search_tap("Customize and control Google Chrome", serial=serial)
+        ui.search_tap("Uninstall updates ", serial=serial)
+        ui.search_tap("OK", serial=serial)
+
+    # זרם 1 - אם מופיע Uninstall updates ישיר
+    elif "uninstall updates" in xml:
+        log.info("[handle_play_store_flow] Detected direct Uninstall updates flow")
+        ui.search_tap("Uninstall updates ", serial=serial)
+
+    else:
+        log.warning("[handle_play_store_flow] No known action detected in App info screen")
+
+    # חזרה לבית
+    ah.adb(["shell", "input", "keyevent", "3"])
+
+
+@log_if_failed
+def Disable_play_store_flow(serial: Optional[str] = None):
+
+
+    ui.search_tap_ps("Play Store",       serial=serial)  
+    ui.search_tap_ps("Settings",       serial=serial) 
+    ah.wait(3) 
+    ui.search_tap_ps("Settings",       serial=serial) 
+
+    ui.search_tap_ps("Network preferences",       serial=serial)  
+    ui.search_tap_ps("App download preference",       serial=serial)  
+    ui.search_tap_ps("Ask me every time",       serial=serial) 
+    ui.search_tap_ps("OK",       serial=serial) 
+
+    ui.search_tap_ps("Auto-update apps",       serial=serial)  
+    ui.search_tap_ps("Don't auto-update apps",       serial=serial) 
+    ah.adb(["shell", "input", "keyevent", "4"])  # Back
+
+    ui.search_tap_ps("Auto-play videos",       serial=serial)  
+    ui.search_tap_ps("Don't auto-play videos",       serial=serial) 
+    ui.search_tap_ps("OK",       serial=serial) 
+
+    ah.adb(["shell", "input", "keyevent", "3"])  # Home
+
+
+@log_if_failed
+def Disable_Google_Chrome_flow(serial: Optional[str] = None):
+
+    ui.search_tap("Customize and control Google Chrome", serial=serial) # 3 dots
+    ui.search_tap("Settings")#,    serial=serial)
+
+    #___turn off google sevices___
+    ui.search_tap("Google services",    serial=serial)
+    ah.wait(4)
+    ui.disable_all_checked_elements(serial)
+    ah.adb(["shell", "input", "keyevent", "4"])  # Back
+
+    #___turn off privacy and security___
+
+    ui.search_tap("privacy and security", serial=serial)
+    ui.search_tap("Ad privacy", serial=serial)
+    ui.search_tap("vssdvdssdvdsv", serial=serial) #test gibrish
+
+    #____Disable chrome in setting
+
+    for section in ["Ad topics", "Site-suggested ads", "Ad measurement"]:
+        ui.search_tap(section, serial=serial)
+        ah.wait(4)
+        ui.disable_all_checked_elements(serial)
+        ah.adb(["shell", "input", "keyevent", "4"])  # Back
+
+    ah.adb(["shell", "input", "keyevent", "3"])  # Home
+
+
+
+#─────────────────────────────here:───────────────────────────────
+
+    # disable wifi
+    # turn on airplane mode
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
